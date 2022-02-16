@@ -1,1 +1,1 @@
-"# EGG-SynC" 
+# EGG-SynC
