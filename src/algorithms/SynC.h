@@ -11,8 +11,8 @@
 // #include <cuda_runtime.h>
 #include <vector>
 
-using clustering_outliers = std::vector<std::vector<std::vector<int>>>;
-using clustering = std::vector<std::vector<int>>;
+using clustering_outliers = std::vector <std::vector<std::vector < int>>>;
+using clustering = std::vector <std::vector<int>>;
 using outliers = std::vector<int>;
 using neighborhood = std::vector<int>;
 using cluster = std::vector<int>;
@@ -35,10 +35,12 @@ float f_hat(int x, float *D, int n, int d, float *h);
 
 float L(float *D, int n, int d, clustering &M);
 
-clustering DynamicalClustering(float *D, int n, int d, float eps, float lam);
+std::vector <at::Tensor> DynamicalClustering(float *D, int n, int d, float eps, float lam);
 
-clustering SynC(float *D, int n, int d, int k);
+std::vector <at::Tensor> DynamicalClustering_parallel(float *D, int n, int d, float eps, float lam);
 
-clustering FDynamicalClustering(float *D, int n, int d, float eps, float lam, int B);
+//clustering SynC(float *D, int n, int d, int k);
+
+std::vector <at::Tensor> FDynamicalClustering(float *D, int n, int d, float eps, float lam, int B);
 
 #endif //GPU_SYNC_SYNC_H

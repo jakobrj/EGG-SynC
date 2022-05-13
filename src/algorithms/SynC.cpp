@@ -5,9 +5,12 @@
 #include <cmath>
 #include <ctime>
 #include <iostream>
+#include <ATen/ATen.h>
+#include "omp.h"
 
 #include "SynC.h"
 #include "../utils/CPU_math.h"
+#include "../utils/Timer.h"
 #include "../structure/RTree.h"
 
 neighborhood ComputeNeighborhood(int p, float eps, float *D, int n, int d) {
@@ -80,6 +83,49 @@ clustering synCluster(float *D, int n, int d, float eps) {
 
     delete C;
     return Cs;
+}
+
+at::Tensor synCluster_v2(float *D, int n, int d, float eps) {
+//    int *C = full(n, -1);
+
+    std::vector<int> C(n);
+    for (int i = 0; i < n; i++) {
+        C[i] = -1;
+    }
+
+//    clustering Cs;
+
+    int cl = 0;
+
+    for (int i = 0; i < n; i++) {
+        if (C[i] == -1) {
+            bool in_cluster = false;
+//            cluster C_cl;
+//            C_cl.push_back(i);
+            for (int j = 0; j < n; j++) { // we can do this better
+                if (i != j && distance(&D[i * d], &D[j * d], d) <= eps) { //todo dist not needed!
+                    C[j] = cl;
+//                    C_cl.push_back(j);
+                    in_cluster = true;
+                }
+            }
+            if (in_cluster) {
+                C[i] = cl;
+//                Cs.push_back(C_cl);
+                cl += 1;
+            }
+        }
+    }
+
+//    delete C;
+//    return Cs;
+
+    at::Tensor C_ = at::zeros(n, at::kInt);
+    for (int i = 0; i < n; i++) {
+        C_[i] = C[i];
+    }
+
+    return C_;
 }
 
 outliers Outliers(float *D, int n, int d, clustering &C) {
@@ -219,12 +265,18 @@ float L_Clust(float *D, const int n, const int d, clustering &M) {
     return L_M + L_D_given_M;
 }
 
-clustering DynamicalClustering(float *D, int n, int d, float eps, float lam) {
+std::vector <at::Tensor> DynamicalClustering(float *D, int n, int d, float eps, float lam) {
+    Timer<6> timer;
+
+    timer.start_stage_time(0);
     float *D_current = clone(D, n * d);
     float *D_next = clone(D, n * d);
 
     float r_local = 0.;
+    timer.end_stage_time(0);
     while (r_local < lam) {
+        timer.start_itr_time();
+        timer.start_stage_time(2);
         r_local = 0.;
         for (int p = 0; p < n; p++) {
             const neighborhood N_t = ComputeNeighborhood(p, eps, D_current, n, d);
@@ -233,84 +285,177 @@ clustering DynamicalClustering(float *D, int n, int d, float eps, float lam) {
             float r_p = ComputeLocationOrder(p, N_t, D_current, n, d);
             r_local += r_p;
         }
+
+//        for (int p = 0; p < n; p++) {//this is more correct, but not actually what they are doing
+//            const neighborhood N_tp = ComputeNeighborhood(p, eps, D_next, n, d);
+//            float r_p = ComputeLocationOrder(p, N_tp, D_next, n, d);
+//            r_local += r_p;
+//        }
+
         r_local /= n;
         printf("r_local: %f\n", r_local);
 
         float *tmp = D_next;
         D_next = D_current;
         D_current = tmp;
+        timer.end_stage_time(2);
+        timer.end_itr_time();
     }
 
-    return synCluster(D_current, n, d, eps);
+    timer.start_stage_time(4);
+    at::Tensor C = synCluster_v2(D_current, n, d, eps);
+    timer.end_stage_time(4);
+
+    std::vector <at::Tensor> result;
+    result.push_back(C);
+
+    at::Tensor itr_times = timer.get_itr_times();
+    result.push_back(itr_times);
+
+    at::Tensor stage_times = timer.get_stage_times();
+    result.push_back(stage_times);
+
+    at::Tensor space = at::zeros(1, at::kInt);
+    space[0] = 0;
+    result.push_back(space);
+
+    delete D_current;
+    delete D_next;
+
+    return result;
 }
 
-clustering SynC(float *h_D, int n, int d, int k) {
-    int l = 0;
-    float eps = NN(h_D, n, d, k);
-    float delta_eps = NN(h_D, n, d, k + 1) - eps;
-    bool global_synchronization = false;
-    std::vector <clustering> M;
-    std::vector<float> coding_cost;
-    while (!global_synchronization) {
-        clustering C = DynamicalClustering(h_D, n, d, eps, 1 - 1e-3);
-        M.push_back(C);
-        if (M[l].size() == 1) {
-            global_synchronization = true;
-        }
-        float cost = L(h_D, n, d, M[l]);
-        coding_cost.push_back(cost);
-        eps += delta_eps;
-        l += 1;
-    }
-
-    int l_star = arg_min(coding_cost); // forall l
-    clustering M_star = M[l_star];
-    return M_star;
-}
+std::vector <at::Tensor> DynamicalClustering_parallel(float *D, int n, int d, float eps, float lam) {
 
 
-clustering FDynamicalClustering(float *D, int n, int d, float eps, float lam, int B) {
+    Timer<6> timer;
+
+//    omp_set_num_threads(12);
+    printf("Max number of threads: %d\n", omp_get_max_threads());
+
+    timer.start_stage_time(0);
     float *D_current = clone(D, n * d);
     float *D_next = clone(D, n * d);
+    float * rs = new float[omp_get_max_threads()];
 
+    float r_local = 0.;
+    timer.end_stage_time(0);
+    while (r_local < lam) {
+        timer.start_itr_time();
+        timer.start_stage_time(2);
+        r_local = 0.;
+
+        for (int i =0;i<omp_get_max_threads();i++){
+            rs[i] = 0.;
+        }
+
+#pragma omp parallel for
+        for (int p = 0; p < n; p++) {
+//            printf("Number of threads: %d/%d\n", omp_get_thread_num(),omp_get_num_threads());
+            const neighborhood N_t = ComputeNeighborhood(p, eps, D_current, n, d);
+            UpdatePoint(p, N_t, D_current, D_next, n, d);
+//            const neighborhood N_tp = ComputeNeighborhood(p, eps, D_current, n, d);
+            float r_p = ComputeLocationOrder(p, N_t, D_current, n, d);
+//            r_local += r_p;
+            rs[omp_get_thread_num()] += r_p;
+        }
+        r_local = 0.;
+        for (int i =0;i<omp_get_max_threads();i++){
+            r_local +=rs[i];
+        }
+
+
+        r_local /= n;
+        printf("r_local: %f\n", r_local);
+
+        float *tmp = D_next;
+        D_next = D_current;
+        D_current = tmp;
+        timer.end_stage_time(2);
+        timer.end_itr_time();
+    }
+
+    timer.start_stage_time(4);
+    at::Tensor C = synCluster_v2(D_current, n, d, eps);
+    timer.end_stage_time(4);
+
+    std::vector <at::Tensor> result;
+    result.push_back(C);
+
+    at::Tensor itr_times = timer.get_itr_times();
+    result.push_back(itr_times);
+
+    at::Tensor stage_times = timer.get_stage_times();
+    result.push_back(stage_times);
+
+    at::Tensor space = at::zeros(1, at::kInt);
+    space[0] = 0;
+    result.push_back(space);
+
+    delete D_current;
+    delete D_next;
+
+    return result;
+}
+
+//clustering SynC(float *h_D, int n, int d, int k) {
+//    int l = 0;
+//    float eps = NN(h_D, n, d, k);
+//    float delta_eps = NN(h_D, n, d, k + 1) - eps;
+//    bool global_synchronization = false;
+//    std::vector <clustering> M;
+//    std::vector<float> coding_cost;
+//    while (!global_synchronization) {
+//        clustering C = DynamicalClustering(h_D, n, d, eps, 1 - 1e-3);
+//        M.push_back(C);
+//        if (M[l].size() == 1) {
+//            global_synchronization = true;
+//        }
+//        float cost = L(h_D, n, d, M[l]);
+//        coding_cost.push_back(cost);
+//        eps += delta_eps;
+//        l += 1;
+//    }
+//
+//    int l_star = arg_min(coding_cost); // forall l
+//    clustering M_star = M[l_star];
+//    return M_star;
+//}
+
+
+std::vector <at::Tensor> FDynamicalClustering(float *D, int n, int d, float eps, float lam, int B) {
+    Timer<6> timer;
+
+    timer.start_stage_time(0);
+    float *D_current = clone(D, n * d);
+    float *D_next = clone(D, n * d);
+    timer.end_stage_time(0);
 
     RTree tree(d, B);
-    std::clock_t start;
-
-    start = std::clock();
     for (int p = 0; p < n; p++) {
         tree.insert(new std::pair<int, float *>(p, &D_current[p * d]));
     }
-    std::cout << "Time: " << (std::clock() - start) / (double) (CLOCKS_PER_SEC / 1000) << " ms" << std::endl;
 
     float r_local = 0.;
     while (r_local < lam) {
+        timer.start_itr_time();
+        timer.start_stage_time(2);
         r_local = 0.;
 
-        start = std::clock();
         for (int p = 0; p < n; p++) {
             const neighborhood N_t = tree.range(eps, &D_current[p * d]);//ComputeNeighborhood(p, eps, D_current, n, d);
             UpdatePoint(p, N_t, D_current, D_next, n, d);
             float r_p = ComputeLocationOrder(p, N_t, D_current, n, d);
             r_local += r_p;
         }
-        std::cout << "Time: " << (std::clock() - start) / (double) (CLOCKS_PER_SEC / 1000) << " ms" << std::endl;
+        timer.end_stage_time(2);
 
-        start = std::clock();
+        timer.start_stage_time(1);
         for (int p = 0; p < n; p++) {
-
-            //delete point
             tree.remove(new std::pair<int, float *>(p, &D_current[p * d]));
-
-//            if (!tree.check()) {
-//                printf("Line %d in file %s\n", __LINE__, __FILE__);
-//                throw std::invalid_argument("invalid MBR");
-//            }
-
-            //insert point
             tree.insert(new std::pair<int, float *>(p, &D_next[p * d]));
         }
-        std::cout << "Time: " << (std::clock() - start) / (double) (CLOCKS_PER_SEC / 1000) << " ms" << std::endl;
+        timer.end_stage_time(1);
 
         r_local /= n;
         printf("r_local: %f\n", r_local);
@@ -318,7 +463,25 @@ clustering FDynamicalClustering(float *D, int n, int d, float eps, float lam, in
         float *tmp = D_next;
         D_next = D_current;
         D_current = tmp;
+        timer.end_itr_time();
     }
 
-    return synCluster(D_current, n, d, eps);
+    timer.start_stage_time(4);
+    at::Tensor C = synCluster_v2(D_current, n, d, eps);
+    timer.end_stage_time(4);
+
+    std::vector <at::Tensor> result;
+    result.push_back(C);
+
+    at::Tensor itr_times = timer.get_itr_times();
+    result.push_back(itr_times);
+
+    at::Tensor stage_times = timer.get_stage_times();
+    result.push_back(stage_times);
+
+    at::Tensor space = at::zeros(1, at::kInt);
+    space[0] = 0;
+    result.push_back(space);
+
+    return result;
 }

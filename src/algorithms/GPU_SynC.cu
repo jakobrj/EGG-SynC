@@ -5,9 +5,12 @@
 #include "GPU_SynC.cuh"
 #include "../utils/GPU_utils.cuh"
 #include "../utils/CPU_math.h"
+#include "../utils/Timer.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <ATen/ATen.h>
+//#include <torch/extension.h>
 
 #define BLOCK_SIZE 128
 
@@ -22,6 +25,18 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
         if (abort)
             exit(code);
     }
+}
+
+
+int get_current_memory_usage() {
+    size_t free_byte;
+    size_t total_byte;
+    auto cuda_status = cudaMemGetInfo(&free_byte, &total_byte);
+    if ( cudaSuccess != cuda_status ){
+        printf("Error: cudaMemGetInfo fails, %s \n", cudaGetErrorString(cuda_status) );
+        exit(1);
+    }
+    return total_byte - free_byte;
 }
 
 __device__ int get_start(const int *d_array, const int idx) {
@@ -201,8 +216,12 @@ __global__ void rename_cluster(int *__restrict__ d_C, int *__restrict__ d_map, c
     }
 }
 
-clustering GPU_DynamicalClustering(float *h_D, int n, int d, float eps, float lam) {
+std::vector <at::Tensor>  GPU_DynamicalClustering(float *h_D, int n, int d, float eps, float lam) {
 
+    gpu_reset_max_memory_usage();
+    Timer<6> timer;
+
+    timer.start_stage_time(0);
     //    printf("Got to: line %d in file %s\n", __LINE__, __FILE__);
     int number_of_blocks = n / BLOCK_SIZE;
     if (n % BLOCK_SIZE)
@@ -214,11 +233,17 @@ clustering GPU_DynamicalClustering(float *h_D, int n, int d, float eps, float la
     float *d_r_local = gpu_malloc_float(1);
     float r_local = 0.;
     int itr = 0;
+    timer.end_stage_time(0);
     while (r_local < lam && itr < 100) {
+        timer.start_itr_time();
+
+        timer.start_stage_time(2);
         gpu_set_all_zero(d_r_local, 1);
         itr++;
 
         kernel_itr << < number_of_blocks, min(n, BLOCK_SIZE) >> > (d_r_local, d_D_current, d_D_next, n, d, eps);
+        cudaDeviceSynchronize();
+        timer.end_stage_time(2);
 
         float *d_tmp = d_D_next;
         d_D_next = d_D_current;
@@ -226,9 +251,12 @@ clustering GPU_DynamicalClustering(float *h_D, int n, int d, float eps, float la
 
         r_local = copy_last_D_to_H(d_r_local, 1) / n;
         printf("simple GPU - itr: %d, r_local: %f\n", itr, r_local);
+
+        timer.end_itr_time();
     }
 
-    clustering C;
+//    clustering C;
+    timer.start_stage_time(4);
 
     int *d_C = gpu_malloc_int(n);
     gpu_set_all(d_C, n, -1);
@@ -241,28 +269,61 @@ clustering GPU_DynamicalClustering(float *h_D, int n, int d, float eps, float la
 
     rename_cluster << < number_of_blocks, min(n, BLOCK_SIZE) >> > (d_C, d_map, n);
 
-    int *h_C = copy_D_to_H(d_C, n);
+    timer.end_stage_time(4);
+    timer.start_stage_time(5);
 
-    int k = maximum(h_C, n) + 1;
-    if (k > 0) {
-        for (int i = 0; i < k; i++) {
-            cluster c;
-            C.push_back(c);
-        }
-        for (int p = 0; p < n; p++) {
-            if (h_C[p] >= 0)
-                C[h_C[p]].push_back(p);
-        }
+    int *h_C = copy_D_to_H(d_C, n);
+//
+//    int k = maximum(h_C, n) + 1;
+//    if (k > 0) {
+//        for (int i = 0; i < k; i++) {
+//            cluster c;
+//            C.push_back(c);
+//        }
+//        for (int p = 0; p < n; p++) {
+//            if (h_C[p] >= 0)
+//                C[h_C[p]].push_back(p);
+//        }
+//    }
+
+    at::Tensor C = at::zeros(n);
+//    int k = maximum(h_C, n) + 1;
+//    if (k > 0) {
+//        for (int i = 0; i < k; i++) {
+//            cluster c;
+//            C.push_back(c);
+//        }
+//        for (int p = 0; p < n; p++) {
+//            if (h_C[p] >= 0)
+//                C[h_C[p]].push_back(p);
+//        }
+//    }
+    for (int p = 0; p < n; p++) {
+        C[p] = h_C[p];
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
     delete h_C;
 
-    return C;
+    std::vector <at::Tensor> result;
+    result.push_back(C);
+
+    at::Tensor itr_times = timer.get_itr_times();
+    result.push_back(itr_times);
+    at::Tensor stage_times = timer.get_stage_times();
+    result.push_back(stage_times);
+    at::Tensor space = at::zeros(1, at::kInt);
+    space[0] = (int) gpu_max_memory_usage();
+    result.push_back(space);
+
+    timer.end_stage_time(5);
+    return result;
+
+//    return C;
 }
 
 __global__ void
@@ -701,14 +762,14 @@ clustering GPU_DynamicalClustering_GRID1(float *h_D, int n, int d, float eps, fl
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
     delete h_C;
 
     return C;
@@ -794,14 +855,14 @@ clustering GPU_DynamicalClustering_GRID2(float *h_D, int n, int d, float eps, fl
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
     delete h_C;
 
     return C;
@@ -1074,14 +1135,14 @@ clustering GPU_DynamicalClustering_GRID_2D1(float *h_D, int n, int d, float eps,
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
     delete h_C;
 
     return C;
@@ -1169,14 +1230,14 @@ clustering GPU_DynamicalClustering_GRID_2D2(float *h_D, int n, int d, float eps,
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
     delete h_C;
 
     return C;
@@ -1444,14 +1505,14 @@ clustering GPU_DynamicalClustering_GRID_STAD0(float *h_D, int n, int d, float ep
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
     delete h_C;
 
     return C;
@@ -1946,17 +2007,17 @@ clustering GPU_DynamicalClustering_GRID_STAD1(float *h_D, int n, int d, float ep
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
-    cudaFree(d_sum_cos);
-    cudaFree(d_sum_sin);
-    cudaFree(d_r_local);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
+    gpu_free(d_r_local);
 
     delete h_C;
 
@@ -2640,17 +2701,17 @@ GPU_DynamicalClustering_GRID_STAD2(float *h_D, int n, int d, float eps, float la
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
-    cudaFree(d_sum_cos);
-    cudaFree(d_sum_sin);
-    cudaFree(d_r_local);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
+    gpu_free(d_r_local);
 
     delete h_C;
 
@@ -3217,20 +3278,20 @@ GPU_DynamicalClustering_list(float *h_D, int n, int d, float eps, float lam, int
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_sum_cos);
-    cudaFree(d_sum_sin);
-    cudaFree(d_r_local);
-    cudaFree(d_list_cell_dim_ids);
-    cudaFree(d_new_list_cell_dim_ids);
-    cudaFree(d_list_cell_included);
-    cudaFree(d_list_cell_idxs);
-    cudaFree(d_list_cell_sizes);
-    cudaFree(d_list_cell_ends);
-    cudaFree(d_new_list_cell_ends);
-    cudaFree(d_list_cell_points);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
+    gpu_free(d_r_local);
+    gpu_free(d_list_cell_dim_ids);
+    gpu_free(d_new_list_cell_dim_ids);
+    gpu_free(d_list_cell_included);
+    gpu_free(d_list_cell_idxs);
+    gpu_free(d_list_cell_sizes);
+    gpu_free(d_list_cell_ends);
+    gpu_free(d_new_list_cell_ends);
+    gpu_free(d_list_cell_points);
 
     delete h_C;
 
@@ -3505,17 +3566,17 @@ clustering GPU_DynamicalClustering_GRID_STAD3(float *h_D, int n, int d, float ep
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
-    cudaFree(d_sum_cos);
-    cudaFree(d_sum_sin);
-    cudaFree(d_r_local);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
+    gpu_free(d_r_local);
 
     delete h_C;
 
@@ -3907,17 +3968,17 @@ clustering GPU_DynamicalClustering_GRID_STAD4(float *h_D, int n, int d, float ep
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
-    cudaFree(d_sum_cos);
-    cudaFree(d_sum_sin);
-    cudaFree(d_r_local);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
+    gpu_free(d_r_local);
 
     delete h_C;
 
@@ -4310,17 +4371,17 @@ GPU_DynamicalClustering_GRID_STAD4_1(float *h_D, int n, int d, float eps, float 
         }
     }
 
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
-    cudaFree(d_grid_sizes);
-    cudaFree(d_grid_ends);
-    cudaFree(d_grid);
-    cudaFree(d_sum_cos);
-    cudaFree(d_sum_sin);
-    cudaFree(d_r_local);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+    gpu_free(d_grid_sizes);
+    gpu_free(d_grid_ends);
+    gpu_free(d_grid);
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
+    gpu_free(d_r_local);
 
     delete h_C;
 
@@ -4509,9 +4570,12 @@ kernel_inner_grid_stats(float *d_sum_cos, float *d_sum_sin,
                                                     d, inner_grid_width, inner_cell_size);
 
         for (int i = 0; i < d; i++) {
+            int g = d_inner_cell_dim_ids[inner_cell_idx * d + i];
             float val = d_D_current[p * d + i];
-            atomicAdd(&d_sum_cos[inner_cell_idx * d + i], cos(val));
-            atomicAdd(&d_sum_sin[inner_cell_idx * d + i], sin(val));
+//            atomicAdd(&d_sum_cos[inner_cell_idx * d + i], cos(val)); //- cos(l * inner_cell_size));
+//            atomicAdd(&d_sum_sin[inner_cell_idx * d + i], sin(val)); //- sin(l * inner_cell_size));
+            atomicAdd(&d_sum_cos[inner_cell_idx * d + i], cos(val) - cos(g * inner_cell_size));
+            atomicAdd(&d_sum_sin[inner_cell_idx * d + i], sin(val) - sin(g * inner_cell_size));
         }
     }
 }
@@ -4559,6 +4623,7 @@ kernel_itr_grid_STAD5(float *__restrict__ d_r_local,
             if (id != idm || id != idp)
                 on_boarder = true;
         }
+
         float r_c = 0.;
         int number_of_neighbors = 0;
         int half_count = 0;
@@ -4714,15 +4779,21 @@ kernel_itr_grid_STAD5(float *__restrict__ d_r_local,
         if ((!on_boarder && number_of_neighbors != inner_cell_number_of_points) ||
             (on_boarder && number_of_neighbors != half_count)) {
             d_r_local[0] = 0.;
-            if (itr > 30 && 22000 > inner_cell_number_of_points && 20000 < inner_cell_number_of_points && p== 87378 ) {
-                printf("itr: %d, p: %d, c: %d full: %d, half: %d, lower bound half: %d, on_boarder: %d\n", itr, p,
-                       tmp_inner_cell_idx,
-                       number_of_neighbors, half_count,
-                       inner_cell_number_of_points, on_boarder ? 1 : 0);
+            if (itr > 30 && 22000 > inner_cell_number_of_points && 20000 < inner_cell_number_of_points && p == 87378) {
+//                printf("itr: %d, p: %d, c: %d full: %d, half: %d, lower bound half: %d, on_boarder: %d\n", itr, p,
+//                       tmp_inner_cell_idx,
+//                       number_of_neighbors, half_count,
+//                       inner_cell_number_of_points, on_boarder ? 1 : 0);
+//
+//                printf("update: ");
+//                for (int l = 0; l < d; l++) {
+//                    printf("%0.10f ", sum[l] / number_of_neighbors);
+//                }
+//                printf("\n");
 
-                printf("update: ");
+                printf("location: ");
                 for (int l = 0; l < d; l++) {
-                    printf("%0.10f ", sum[l] / number_of_neighbors);
+                    printf("%0.10f ", d_D_next[p * d + l]);
                 }
                 printf("\n");
             }
@@ -5347,7 +5418,7 @@ kernel_itr_grid_STAD5_5(const int *__restrict__ d_pre_grid_cells, const int *__r
                         const float *__restrict__ d_sum_sin, const float *__restrict__ d_sum_cos,
                         const int outer_grid_width, const int outer_grid_dims, const float outer_cell_size,
                         const int inner_grid_width, const float inner_cell_size,
-                        const int n, const int d, const float eps) {
+                        const int n, const int d, const float eps, int itr) {
 
     const int outer_grid_radius = ceil(eps / outer_cell_size);
 
@@ -5359,9 +5430,25 @@ kernel_itr_grid_STAD5_5(const int *__restrict__ d_pre_grid_cells, const int *__r
         const int tmp_outer_cell = compute_cell_id(d_D_current, p, d, outer_grid_width, outer_grid_dims,
                                                    outer_cell_size);
 
+
+//        bool on_boarder = false;
+//        for (int l = 0; l < d; l++) {
+//            sum[l] = 0.;
+//
+//
+//            int idm = (int) ((d_D_current[p * d + l] - 0.00001) / inner_cell_size);
+//            int id = (int) (d_D_current[p * d + l] / inner_cell_size);
+//            int idp = (int) ((d_D_current[p * d + l] + 0.00001) / inner_cell_size);
+//
+//
+//            if (id != idm || id != idp)
+//                on_boarder = true;
+//        }
+
         for (int l = 0; l < d; l++) {
             sum[l] = 0.;
         }
+
         int number_of_neighbors = 0;
 
         const int pre_start = get_start(d_pre_grid_ends, tmp_outer_cell);
@@ -5447,6 +5534,26 @@ kernel_itr_grid_STAD5_5(const int *__restrict__ d_pre_grid_cells, const int *__r
 
         if (number_of_neighbors != inner_cell_number_of_points) {
             d_r_local[0] = 0.;
+
+
+//            if (itr > 30 && 22000 > inner_cell_number_of_points && 20000 < inner_cell_number_of_points && p== 87378 ) {
+//                printf("itr: %d, p: %d, c: %d full: %d, half: %d, lower bound half: %d, on_boarder: %d\n", itr, p,
+//                       inner_cell_idx,
+//                       number_of_neighbors, half_count,
+//                       inner_cell_number_of_points, on_boarder ? 1 : 0);
+//
+//                printf("update: ");
+//                for (int l = 0; l < d; l++) {
+//                    printf("%0.10f ", sum[l] / number_of_neighbors);
+//                }
+//                printf("\n");
+//
+//                printf("location: ");
+//                for (int l = 0; l < d; l++) {
+//                    printf("%0.10f ", d_D_next[p * d + l]);
+//                }
+//                printf("\n");
+//            }
         }
     }
     delete sum;
@@ -5469,8 +5576,9 @@ kernel_itr_grid_STAD5_5_1(const int *__restrict__ d_pre_grid_cells, const int *_
     extern __shared__ float s_d[];
 
 //    float *sum = new float[d];
-    float *sum = &s_d[threadIdx.x * d * 2];
-    float *x = &sum[d];
+    float *sum = &s_d[threadIdx.x * d * 3];
+    float *sum_small = &sum[d];
+    float *x = &sum_small[d];
 
     for (int p_idx = threadIdx.x + blockIdx.x * blockDim.x; p_idx < n; p_idx += blockDim.x * gridDim.x) {
         const int p = d_inner_cell_points[p_idx];
@@ -5487,6 +5595,7 @@ kernel_itr_grid_STAD5_5_1(const int *__restrict__ d_pre_grid_cells, const int *_
 
         for (int l = 0; l < d; l++) {
             sum[l] = 0.;
+            sum_small[l] = 0.;
             x[l] = d_D_current[p * d + l];
 
             int idm = (int) ((x[l] - 0.00001) / inner_cell_size);
@@ -5540,15 +5649,25 @@ kernel_itr_grid_STAD5_5_1(const int *__restrict__ d_pre_grid_cells, const int *_
                 const int inner_cell_start = get_start(d_inner_grid_ends, inner_cell_idx);
                 const int inner_cell_end = get_end(d_inner_grid_ends, inner_cell_idx);
                 const int inner_cell_number_of_points = inner_cell_end - inner_cell_start;
+//                fully_included = false;//todo remove
                 if (fully_included) {
                     for (int l = 0; l < d; l++) {
 
 //                        sum[l] += ((d_sum_sin[inner_cell_idx * d + l] * cos(x[l])) -
 //                                   (d_sum_cos[inner_cell_idx * d + l] * sin(x[l])));
 
+                        int g = d_inner_cell_dim_ids[inner_cell_idx * d + l];
+
                         const float x_t = d_D_current[p * d + l];
-                        const float to_be_added = ((d_sum_sin[inner_cell_idx * d + l] * cos(x_t)) -
-                                                   (d_sum_cos[inner_cell_idx * d + l] * sin(x_t)));
+                        const float to_be_added = (((sin(g * inner_cell_size) * inner_cell_number_of_points +
+                                                     d_sum_sin[inner_cell_idx * d + l]) * cos(x_t)) -
+                                                   ((cos(g * inner_cell_size) * inner_cell_number_of_points +
+                                                     d_sum_cos[inner_cell_idx * d + l]) * sin(x_t)));
+
+//                        if (p == 87378) {
+//                            printf("c: %d, to_be_added[%d]: %f\n", inner_cell_idx, l, to_be_added);
+//                        }
+
                         sum[l] += to_be_added;
 
                     }
@@ -5563,9 +5682,9 @@ kernel_itr_grid_STAD5_5_1(const int *__restrict__ d_pre_grid_cells, const int *_
                                 int q = d_inner_cell_points[q_idx];
                                 float dist = gpu_distance(p, q, d_D_current, d);
                                 if (dist <= eps / 2.) {
-                                    for (int l = 0; l < d; l++) {
-                                        sum[l] += sin(d_D_current[q * d + l] - x[l]);
-                                    }
+//                                    for (int l = 0; l < d; l++) {
+//                                        sum_small[l] += sin(d_D_current[q * d + l] - x[l]);
+//                                    }
                                     half_count++;
                                 }
                             }
@@ -5577,8 +5696,11 @@ kernel_itr_grid_STAD5_5_1(const int *__restrict__ d_pre_grid_cells, const int *_
                         int q = d_inner_cell_points[q_idx];
                         float dist = gpu_distance(p, q, d_D_current, d);
                         if (dist <= eps) {
+//                            if(itr >= 30 && p==95860){
+//                                printf("q: %d\n", q);
+//                            }
                             for (int l = 0; l < d; l++) {
-                                sum[l] += sin(d_D_current[q * d + l] - x[l]);
+                                sum_small[l] += sin(d_D_current[q * d + l] - x[l]);
                             }
                             number_of_neighbors++;
                         }
@@ -5588,15 +5710,15 @@ kernel_itr_grid_STAD5_5_1(const int *__restrict__ d_pre_grid_cells, const int *_
         }
 
         for (int l = 0; l < d; l++) {
-            d_D_next[p * d + l] = x[l] + sum[l] / number_of_neighbors;
+            d_D_next[p * d + l] = x[l] + (sum[l] + sum_small[l]) / number_of_neighbors;
         }
 
 
         if ((!on_boarder && number_of_neighbors != center_inner_cell_number_of_points) ||
             (on_boarder && number_of_neighbors != half_count)) {
             d_r_local[0] = 0.;
-            if (itr > 30 && 10 > center_inner_cell_number_of_points) {
 
+            if (itr > 30 && center_inner_cell_number_of_points == 1) {
 //                printf("itr: %d, p: %d, c: %d full: %d, half: %d, lower bound half: %d, on_boarder: %d\n", itr, p,
 //                       center_inner_cell_idx,
 //                       number_of_neighbors, half_count,
@@ -5604,21 +5726,49 @@ kernel_itr_grid_STAD5_5_1(const int *__restrict__ d_pre_grid_cells, const int *_
 //
 //                printf("update: ");
 //                for (int l = 0; l < d; l++) {
-//                    printf("%0.7f ", sum[l] / number_of_neighbors);
+//                    printf("%0.10f ", (sum[l] + sum_small[l]) / number_of_neighbors);
+//                }
+//                printf("\n");
+
+//                printf("location: ");
+//                for (int l = 0; l < d; l++) {
+//                    printf("%0.20f ", d_D_next[p * d + l]);
+//                }
+//                printf("\n");
+
+//
+//                printf("sum: ");
+//                for (int l = 0; l < d; l++) {
+//                    printf("%0.10f ", sum[l]);
 //                }
 //                printf("\n");
 //
-//                printf("x: ");
+//                printf("sum_small: ");
 //                for (int l = 0; l < d; l++) {
-//                    printf("%0.7f ", x[l]);
-//                }
-//                printf("\n");
-//                printf("id: ");
-//                for (int l = 0; l < d; l++) {
-//                    printf("%d ", (int) (x[l] / outer_cell_size));
+//                    printf("%0.10f ", sum_small[l]);
 //                }
 //                printf("\n");
             }
+//
+//            if (itr > 30 && 80 >= center_inner_cell_number_of_points && 70 <= center_inner_cell_number_of_points &&
+//                p == 87217) {
+//                printf("itr: %d, p: %d, c: %d full: %d, half: %d, lower bound half: %d, on_boarder: %d\n", itr, p,
+//                       center_inner_cell_idx,
+//                       number_of_neighbors, half_count,
+//                       center_inner_cell_number_of_points, on_boarder ? 1 : 0);
+//
+//                printf("update: ");
+//                for (int l = 0; l < d; l++) {
+//                    printf("%0.10f ", (sum[l] + sum_small[l]) / number_of_neighbors);
+//                }
+//                printf("\n");
+//
+//                printf("location: ");
+//                for (int l = 0; l < d; l++) {
+//                    printf("%0.10f ", d_D_next[p * d + l]);
+//                }
+//                printf("\n");
+//            }
         }
     }
 }
@@ -7624,7 +7774,7 @@ __global__ void kernel_float_grid_extra_check_part1_count(int *d_to_be_checked_s
 
                                 if (eps < dist && dist <= eps_extra) {
 
-                                    int i = atomicInc((unsigned int *) d_to_be_checked_size, n * n);
+                                    int i = atomicInc((unsigned int *) d_to_be_checked_size, n * n);//todo why i?
 
                                 }
                             }
@@ -7851,12 +8001,6 @@ GPU_DynamicalClustering_DOUBLE_GRID(float *h_D, int n, int d, float eps, float l
                        inner_grid_width, inner_grid_dims, inner_cell_size);
 
 
-//        if(itr>30) {
-//            int *h_outer_grid_sizes = copy_D_to_H(d_outer_grid_sizes, outer_grid_width * outer_grid_width);
-//            print_array(h_outer_grid_sizes, outer_grid_width, outer_grid_width);
-//            delete h_outer_grid_sizes;
-//        }
-
         gpu_set_all_zero(d_sum_cos, n * d);
         gpu_set_all_zero(d_sum_sin, n * d);
 
@@ -7868,6 +8012,20 @@ GPU_DynamicalClustering_DOUBLE_GRID(float *h_D, int n, int d, float eps, float l
                 outer_cell_size,
                 inner_grid_width, inner_cell_size,
                 n, d);
+
+
+//        if (itr > 300) {
+//            printf("grid width: %f\n", inner_cell_size);
+//            int *h_outer_grid_sizes = copy_D_to_H(d_outer_grid_sizes, outer_grid_width * outer_grid_width);
+//            print_array(h_outer_grid_sizes, outer_grid_width, outer_grid_width);
+//            delete h_outer_grid_sizes;
+//
+//            printf("d_sum_sin:");
+//            print_array_gpu(d_sum_sin, 5);
+//            printf("d_sum_cos:");
+//            print_array_gpu(d_sum_cos, 5);
+//        }
+
 
         /// do one iteration
         if (version == 2) {
@@ -7943,7 +8101,7 @@ GPU_DynamicalClustering_DOUBLE_GRID(float *h_D, int n, int d, float eps, float l
                             eps, outer_cell_size);
 
 //            cudaMemset(check, 0, sizeof(int));
-            kernel_itr_grid_STAD5_5_1 << < number_of_blocks, min(n, BLOCK_SIZE), BLOCK_SIZE * d * 2 * sizeof(float) >> >
+            kernel_itr_grid_STAD5_5_1 << < number_of_blocks, min(n, BLOCK_SIZE), BLOCK_SIZE * d * 3 * sizeof(float) >> >
                                                                                  (d_pre_grid_cells, d_pre_grid_ends, d_r_local,
                                                                                          d_outer_grid_ends,
                                                                                          d_inner_grid_ends, d_inner_grid_points,
@@ -8272,56 +8430,429 @@ GPU_DynamicalClustering_DOUBLE_GRID(float *h_D, int n, int d, float eps, float l
     }
 
     if (version == 5) {
-        cudaFree(d_pre_grid_sizes);
-        cudaFree(d_pre_grid_ends);
-        cudaFree(d_pre_grid_cells);
-        cudaFree(d_pre_grid_non_empty);
+        gpu_free(d_pre_grid_sizes);
+        gpu_free(d_pre_grid_ends);
+        gpu_free(d_pre_grid_cells);
+        gpu_free(d_pre_grid_non_empty);
     }
 
     if (version == 6) {
-        cudaFree(d_pre_grid_sizes);
-        cudaFree(d_pre_grid_ends);
-        cudaFree(d_pre_grid_cells);
-        cudaFree(d_pre_grid_non_empty);
-        cudaFree(d_pre_inner_grid_sizes);
-        cudaFree(d_pre_inner_grid_ends);
-        cudaFree(d_pre_inner_grid_cells);
-        cudaFree(d_pre_inner_grid_fully_cells);
-        cudaFree(d_pre_inner_grid_fully_ends);
-        cudaFree(d_pre_inner_grid_fully_sizes);
+        gpu_free(d_pre_grid_sizes);
+        gpu_free(d_pre_grid_ends);
+        gpu_free(d_pre_grid_cells);
+        gpu_free(d_pre_grid_non_empty);
+        gpu_free(d_pre_inner_grid_sizes);
+        gpu_free(d_pre_inner_grid_ends);
+        gpu_free(d_pre_inner_grid_cells);
+        gpu_free(d_pre_inner_grid_fully_cells);
+        gpu_free(d_pre_inner_grid_fully_ends);
+        gpu_free(d_pre_inner_grid_fully_sizes);
     }
 
     //delete grid structure
-    cudaFree(d_outer_grid_sizes);
-    cudaFree(d_outer_grid_ends);
-    cudaFree(d_new_outer_grid_ends);
-    cudaFree(d_inner_grid_sizes);
-    cudaFree(d_inner_grid_ends);
-    cudaFree(d_new_inner_grid_ends);
-    cudaFree(d_inner_grid_included);
-    cudaFree(d_inner_grid_idxs);
-    cudaFree(d_inner_grid_points);
-    cudaFree(d_inner_grid_cell_dim_ids);
-    cudaFree(d_new_inner_grid_cell_dim_ids);
+    gpu_free(d_outer_grid_sizes);
+    gpu_free(d_outer_grid_ends);
+    gpu_free(d_new_outer_grid_ends);
+    gpu_free(d_inner_grid_sizes);
+    gpu_free(d_inner_grid_ends);
+    gpu_free(d_new_inner_grid_ends);
+    gpu_free(d_inner_grid_included);
+    gpu_free(d_inner_grid_idxs);
+    gpu_free(d_inner_grid_points);
+    gpu_free(d_inner_grid_cell_dim_ids);
+    gpu_free(d_new_inner_grid_cell_dim_ids);
 
     //delete temp data
-    cudaFree(d_D_current);
-    cudaFree(d_D_next);
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
 
     //delete GPU result
-    cudaFree(d_C);
-    cudaFree(d_incl);
-    cudaFree(d_map);
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
 
     //delete summarization
-    cudaFree(d_sum_cos);
-    cudaFree(d_sum_sin);
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
 
     //delete variables
-    cudaFree(d_r_local);
+    gpu_free(d_r_local);
 
     delete h_C;
     gpuErrchk(cudaPeekAtLastError());
 
     return C;
+}
+
+std::vector <at::Tensor> EGG_SynC(float *h_D, int n, int d, float eps) {
+
+    gpu_reset_max_memory_usage();
+
+    float lam = 0.001; //todo fix
+
+    Timer<6> timer;
+
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaPeekAtLastError());
+    timer.start_stage_time(0);
+
+    int number_of_blocks = n / BLOCK_SIZE;
+    if (n % BLOCK_SIZE)
+        number_of_blocks++;
+
+    float *d_D_current = copy_H_to_D(h_D, n * d);
+    float *d_D_next = copy_D_to_D(d_D_current, n * d);
+
+    //computing the sizes for the inner grid
+    float inner_cell_size = sqrt(pow((eps / 2.), 2.) / d);
+    int inner_grid_width = 1 / inner_cell_size;
+    int inner_grid_dims = d;
+
+    //computing the sizes for the outer grid
+    float outer_cell_size = inner_cell_size; // each outer cell contains the inner cells fully
+    int outer_grid_width = 1 / outer_cell_size;
+    int outer_grid_dims = min(d, (int) (log(n) / log(outer_grid_width)));
+    int outer_grid_number_of_cells = pow(outer_grid_width, outer_grid_dims);
+
+    int outer_grid_radius = ceil(eps / outer_cell_size);
+    int outer_grid_neighborhood_width = 2 * outer_grid_radius + 1;
+
+    //allocating space for the outer grid
+    int *d_outer_grid_sizes = gpu_malloc_int(outer_grid_number_of_cells);
+    int *d_outer_grid_ends = gpu_malloc_int(outer_grid_number_of_cells);
+    int *d_new_outer_grid_ends = gpu_malloc_int(outer_grid_number_of_cells);
+
+    //allocating space for the inner grid
+    int *d_inner_grid_sizes = gpu_malloc_int(n);
+    int *d_inner_grid_ends = gpu_malloc_int(n);
+    int *d_new_inner_grid_ends = gpu_malloc_int(n);
+    int *d_inner_grid_included = gpu_malloc_int(n);
+    int *d_inner_grid_idxs = gpu_malloc_int(n);
+    int *d_inner_grid_points = gpu_malloc_int(n);
+    int *d_inner_grid_cell_dim_ids = gpu_malloc_int(n * d);
+    int *d_new_inner_grid_cell_dim_ids = gpu_malloc_int(n * d);
+
+
+    //for MBR check
+    int *d_to_be_checked_size = gpu_malloc_int(1);
+    int *d_to_be_checked;// = gpu_malloc_int(2 * n);
+
+    int *d_pre_grid_non_empty;
+    int *d_pre_grid_sizes;
+    int *d_pre_grid_ends;
+    int *d_pre_grid_cells;
+
+    int possible_neighbors = outer_grid_number_of_cells * pow(outer_grid_neighborhood_width, outer_grid_dims);
+    d_pre_grid_non_empty = gpu_malloc_int(outer_grid_number_of_cells);
+    d_pre_grid_sizes = gpu_malloc_int(outer_grid_number_of_cells);
+    d_pre_grid_ends = gpu_malloc_int(outer_grid_number_of_cells);
+    d_pre_grid_cells = gpu_malloc_int(possible_neighbors);
+
+    //sum of sin and cos for each inner grid cell
+    float *d_sum_cos = gpu_malloc_float(n * d);
+    float *d_sum_sin = gpu_malloc_float(n * d);
+
+    //alocating for final clustering
+    int *d_C = gpu_malloc_int(n);
+    gpu_set_all(d_C, n, -1);
+    int *d_incl = gpu_malloc_int_zero(n);
+    int *d_map = gpu_malloc_int_zero(n);
+
+//    build_the_grid(d_outer_grid_sizes, d_outer_grid_ends, d_new_outer_grid_ends,
+//                   d_inner_grid_sizes, d_inner_grid_ends, d_new_inner_grid_ends,
+//                   d_inner_grid_included, d_inner_grid_idxs,
+//                   d_inner_grid_points, d_inner_grid_cell_dim_ids, d_new_inner_grid_cell_dim_ids,
+//                   d_D_current, d_sum_sin, d_sum_cos,
+//                   n, d,
+//                   outer_grid_number_of_cells, outer_grid_width, outer_grid_dims, outer_cell_size,
+//                   inner_grid_width, inner_grid_dims, inner_cell_size);
+
+
+    float *d_r_local = gpu_malloc_float(1);
+    float r_local = 0.;
+    int itr = 0;
+
+
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaPeekAtLastError());
+    timer.end_stage_time(0);
+
+    while (r_local < lam) {
+        itr++;
+
+        cudaDeviceSynchronize();
+        gpuErrchk(cudaPeekAtLastError());
+        timer.start_itr_time();
+
+        cudaDeviceSynchronize();
+        gpuErrchk(cudaPeekAtLastError());
+        timer.start_stage_time(1);
+
+        gpu_set_all(d_r_local, 1, 1.);
+
+        build_the_grid(d_outer_grid_sizes, d_outer_grid_ends, d_new_outer_grid_ends,
+                       d_inner_grid_sizes, d_inner_grid_ends, d_new_inner_grid_ends,
+                       d_inner_grid_included, d_inner_grid_idxs,
+                       d_inner_grid_points, d_inner_grid_cell_dim_ids, d_new_inner_grid_cell_dim_ids,
+                       d_D_current, d_sum_sin, d_sum_cos,
+                       n, d,
+                       outer_grid_number_of_cells, outer_grid_width, outer_grid_dims, outer_cell_size,
+                       inner_grid_width, inner_grid_dims, inner_cell_size);
+
+
+        gpu_set_all_zero(d_sum_cos, n * d);
+        gpu_set_all_zero(d_sum_sin, n * d);
+
+        kernel_inner_grid_stats << < number_of_blocks, min(n, BLOCK_SIZE) >> > (d_sum_cos, d_sum_sin,
+                d_outer_grid_ends,
+                d_inner_grid_ends, d_inner_grid_cell_dim_ids,
+                d_D_current,
+                outer_grid_width, outer_grid_dims,
+                outer_cell_size,
+                inner_grid_width, inner_cell_size,
+                n, d);
+
+
+        /// do one iteration
+        int number_of_blocks_pre = outer_grid_number_of_cells / BLOCK_SIZE;
+        if (outer_grid_number_of_cells % BLOCK_SIZE) number_of_blocks_pre++;
+
+        gpu_set_all_zero(d_pre_grid_sizes, 1);
+
+        kernel_itr_grid_STAD5_5non_empty << < number_of_blocks_pre, min(outer_grid_number_of_cells, BLOCK_SIZE) >> >
+                                                                    (d_pre_grid_non_empty, d_pre_grid_sizes, d_outer_grid_ends,
+                                                                            outer_grid_number_of_cells);
+
+        int non_empty_cells = copy_last_D_to_H(d_pre_grid_sizes, 1);
+
+
+        int number_of_blocks_ne = non_empty_cells / BLOCK_SIZE;
+        if (non_empty_cells % BLOCK_SIZE) number_of_blocks_ne++;
+
+        gpu_set_all_zero(d_pre_grid_sizes, outer_grid_number_of_cells);
+        gpu_set_all_zero(d_pre_grid_ends, outer_grid_number_of_cells);
+
+
+        kernel_itr_grid_STAD5_5pre_size_1 << < number_of_blocks_ne, min(non_empty_cells,
+                                                                        BLOCK_SIZE) >> >
+                                                                    (d_pre_grid_non_empty, d_pre_grid_sizes, d_outer_grid_ends,
+                                                                            non_empty_cells, outer_grid_dims, outer_grid_width,
+                                                                            eps, outer_cell_size);
+
+        inclusive_scan(d_pre_grid_sizes, d_pre_grid_ends, outer_grid_number_of_cells);
+
+        gpu_set_all_zero(d_pre_grid_sizes, outer_grid_number_of_cells);
+
+        kernel_itr_grid_STAD5_5pre_populate_1 << < number_of_blocks_ne,
+                min(non_empty_cells, BLOCK_SIZE) >> >
+                (d_pre_grid_non_empty, d_pre_grid_cells, d_pre_grid_ends, d_pre_grid_sizes, d_outer_grid_ends,
+                        non_empty_cells, outer_grid_dims, outer_grid_width,
+                        eps, outer_cell_size);
+
+
+        cudaDeviceSynchronize();
+        gpuErrchk(cudaPeekAtLastError());
+        timer.end_stage_time(1);
+        timer.start_stage_time(2);
+
+        kernel_itr_grid_STAD5_5_1 << < number_of_blocks, min(n, BLOCK_SIZE), BLOCK_SIZE * d * 3 * sizeof(float) >> >
+                                                                             (d_pre_grid_cells, d_pre_grid_ends, d_r_local,
+                                                                                     d_outer_grid_ends,
+                                                                                     d_inner_grid_ends, d_inner_grid_points,
+                                                                                     d_inner_grid_cell_dim_ids,
+                                                                                     d_D_next, d_D_current, d_sum_sin, d_sum_cos,
+                                                                                     outer_grid_width, outer_grid_dims,
+                                                                                     outer_cell_size,
+                                                                                     inner_grid_width, inner_cell_size,
+                                                                                     n, d, eps, itr);
+
+        cudaDeviceSynchronize();
+        gpuErrchk(cudaPeekAtLastError());
+        timer.end_stage_time(2);
+
+
+        r_local = copy_last_D_to_H(d_r_local, 1);
+
+        printf("itr: %d, r_local: %f\n", itr, r_local);
+
+
+//        if (itr > 200) {
+//            throw std::exception();
+//        }
+
+        if (r_local >= lam) { //todo should be just r_local not 1
+            cudaDeviceSynchronize();
+            gpuErrchk(cudaPeekAtLastError());
+            timer.start_stage_time(3);
+
+            float eps_extra = 2 * eps - eps * sqrt(15. / 16.) + eps / 2. - sin(eps / 2.);
+
+            cudaMemset(d_to_be_checked_size, 0, sizeof(int));
+//            cudaDeviceSynchronize();
+//            gpuErrchk(cudaPeekAtLastError());
+
+            kernel_float_grid_extra_check_part1_count << < number_of_blocks, min(n, BLOCK_SIZE),
+                    BLOCK_SIZE * (d + 2 * outer_grid_dims) * sizeof(float) >> > (d_to_be_checked_size, d_to_be_checked,
+                            d_r_local,
+                            d_outer_grid_ends,
+                            d_inner_grid_ends,
+                            d_inner_grid_points,
+                            d_inner_grid_cell_dim_ids,
+                            d_D_current, d_sum_sin, d_sum_cos,
+                            outer_grid_width, outer_grid_dims,
+                            outer_cell_size,
+                            inner_grid_width, inner_cell_size,
+                            n, d, eps, eps_extra);
+
+            int size = copy_last_D_to_H(d_to_be_checked_size, 1);
+            d_to_be_checked = gpu_malloc_int(2 * size);
+            cudaMemset(d_to_be_checked_size, 0, sizeof(int));
+
+            kernel_float_grid_extra_check_part1 << < number_of_blocks, min(n, BLOCK_SIZE),
+                    BLOCK_SIZE * (d + 2 * outer_grid_dims) * sizeof(float) >> > (d_to_be_checked_size, d_to_be_checked,
+                            d_r_local,
+                            d_outer_grid_ends,
+                            d_inner_grid_ends,
+                            d_inner_grid_points,
+                            d_inner_grid_cell_dim_ids,
+                            d_D_current, d_sum_sin, d_sum_cos,
+                            outer_grid_width, outer_grid_dims,
+                            outer_cell_size,
+                            inner_grid_width, inner_cell_size,
+                            n, d, eps, eps_extra);
+
+
+            cudaDeviceSynchronize();
+            gpuErrchk(cudaPeekAtLastError());
+
+            kernel_float_grid_extra_check_part2 << < number_of_blocks, min(n, BLOCK_SIZE),
+                    BLOCK_SIZE * (d + 4 * outer_grid_dims) * sizeof(float) >> > (d_to_be_checked_size, d_to_be_checked,
+                            d_r_local,
+                            d_outer_grid_ends,
+                            d_inner_grid_ends,
+                            d_inner_grid_points,
+                            d_inner_grid_cell_dim_ids,
+                            d_D_current, d_sum_sin, d_sum_cos,
+                            outer_grid_width, outer_grid_dims,
+                            outer_cell_size,
+                            inner_grid_width, inner_cell_size,
+                            n, d, eps, eps_extra);
+
+            r_local = copy_last_D_to_H(d_r_local, 1);
+            gpu_free(d_to_be_checked);//todo measure this part aswell
+
+            cudaDeviceSynchronize();
+            gpuErrchk(cudaPeekAtLastError());
+            timer.end_stage_time(3);
+        }
+
+        swap(d_D_current, d_D_next);
+
+        cudaDeviceSynchronize();
+        gpuErrchk(cudaPeekAtLastError());
+        timer.end_itr_time();
+    }
+    if (itr == 100) {
+        printf("kept running!\n");
+    }
+
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaPeekAtLastError());
+    timer.start_stage_time(4);
+    build_the_grid(d_outer_grid_sizes, d_outer_grid_ends, d_new_outer_grid_ends,
+                   d_inner_grid_sizes, d_inner_grid_ends, d_new_inner_grid_ends,
+                   d_inner_grid_included, d_inner_grid_idxs,
+                   d_inner_grid_points, d_inner_grid_cell_dim_ids, d_new_inner_grid_cell_dim_ids,
+                   d_D_current, d_sum_sin, d_sum_cos,
+                   n, d,
+                   outer_grid_number_of_cells, outer_grid_width, outer_grid_dims, outer_cell_size,
+                   inner_grid_width, inner_grid_dims, inner_cell_size);
+
+    GPU_synCluster_float_grid << < number_of_blocks, min(n, BLOCK_SIZE) >> > (d_C, d_D_current,
+            d_outer_grid_ends,
+            d_inner_grid_cell_dim_ids, d_inner_grid_ends,
+            outer_grid_width, outer_grid_dims,
+            outer_cell_size,
+            inner_grid_width, inner_cell_size,
+            n, d);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaPeekAtLastError());
+    timer.end_stage_time(4);
+    timer.start_stage_time(5);
+
+    int *h_C = copy_D_to_H(d_C, n);
+
+    at::Tensor C = at::zeros(n, at::kInt);
+//    int k = maximum(h_C, n) + 1;
+//    if (k > 0) {
+//        for (int i = 0; i < k; i++) {
+//            cluster c;
+//            C.push_back(c);
+//        }
+//        for (int p = 0; p < n; p++) {
+//            if (h_C[p] >= 0)
+//                C[h_C[p]].push_back(p);
+//        }
+//    }
+    for (int p = 0; p < n; p++) {
+        C[p] = h_C[p];
+    }
+
+    gpu_free(d_to_be_checked_size);
+
+    gpu_free(d_pre_grid_sizes);
+    gpu_free(d_pre_grid_ends);
+    gpu_free(d_pre_grid_cells);
+    gpu_free(d_pre_grid_non_empty);
+
+    //delete grid structure
+    gpu_free(d_outer_grid_sizes);
+    gpu_free(d_outer_grid_ends);
+    gpu_free(d_new_outer_grid_ends);
+    gpu_free(d_inner_grid_sizes);
+    gpu_free(d_inner_grid_ends);
+    gpu_free(d_new_inner_grid_ends);
+    gpu_free(d_inner_grid_included);
+    gpu_free(d_inner_grid_idxs);
+    gpu_free(d_inner_grid_points);
+    gpu_free(d_inner_grid_cell_dim_ids);
+    gpu_free(d_new_inner_grid_cell_dim_ids);
+
+    //delete temp data
+    gpu_free(d_D_current);
+    gpu_free(d_D_next);
+
+    //delete GPU result
+    gpu_free(d_C);
+    gpu_free(d_incl);
+    gpu_free(d_map);
+
+    //delete summarization
+    gpu_free(d_sum_cos);
+    gpu_free(d_sum_sin);
+
+    //delete variables
+    gpu_free(d_r_local);
+
+    if(gpu_total_memory_usage() != 0){
+        printf("\n\n\nNot all memory freed!!!\nMissing: %d\n\n\n", gpu_total_memory_usage());
+    }
+
+    delete h_C;
+    gpuErrchk(cudaPeekAtLastError());
+
+
+    std::vector <at::Tensor> result;
+    result.push_back(C);
+
+    at::Tensor itr_times = timer.get_itr_times();
+    result.push_back(itr_times);
+    at::Tensor stage_times = timer.get_stage_times();
+    result.push_back(stage_times);
+    at::Tensor space = at::zeros(1, at::kInt);
+    space[0] = (int) gpu_max_memory_usage();
+    result.push_back(space);
+    timer.end_stage_time(5);
+
+    return result;
 }

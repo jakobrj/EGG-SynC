@@ -56,6 +56,17 @@ def load_D_spatial_network():
     return X
 
 
+def load_EEG_Eye_State():
+    X = np.loadtxt("data/EEG Eye State.arff", delimiter=",", skiprows=0,
+                   usecols=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))
+    return X
+
+def load_Letter():
+    X = np.loadtxt("data/letter-recognition.data", delimiter=",", skiprows=0,
+                   usecols=(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
+    return X
+
+
 def load_CCPP():
     X = np.loadtxt("data/CCPP.data", delimiter="\t", skiprows=1)
     return X
@@ -67,7 +78,7 @@ def load_banknote():
 
 
 def load_eb():
-    X = np.loadtxt("data/eb.arff", delimiter=",", skiprows=0, usecols=(0,1,4))
+    X = np.loadtxt("data/eb.arff", delimiter=",", skiprows=0, usecols=(0, 1, 4))
     return X
 
 

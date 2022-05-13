@@ -5,6 +5,17 @@
 #ifndef GPU_SYNC_GPU_UTILS_H
 #define GPU_SYNC_GPU_UTILS_H
 
+
+void gpu_malloc(void **devPtr, size_t size);
+
+void gpu_free(void *devPtr);
+
+size_t gpu_max_memory_usage();
+
+void gpu_reset_max_memory_usage();
+
+size_t gpu_total_memory_usage();
+
 void inclusive_scan(int *source, int *result, int n);
 
 void inclusive_scan(unsigned int *source, unsigned int *result, int n);
@@ -82,6 +93,7 @@ void print_array_gpu(float *x, int n);
 void print_array_gpu(bool *x, int n);
 
 void print_array_gpu(float *d_X, int n, int m);
+
 void print_array_gpu(int *d_X, int n, int m);
 
 #endif //GPU_SYNC_GPU_UTILS_H
