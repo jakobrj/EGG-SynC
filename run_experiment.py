@@ -7,24 +7,15 @@ import matplotlib.pyplot as plt
 from python.data import *
 from python.algorithms import *
 
-# exp_file = "saved_experiments.pkl"
-exp_file = "saved_experiments_revision_test.pkl"
-# exp_file = "saved_experiments_revision_freya.pkl"
-# exp_file = "saved_experiments_revision_linux.pkl"
-# exp_file = "saved_experiments_revision_windows.pkl"
+exp_file = "saved_experiments.pkl"
 
-params = {"n": 100_000, "d": 2, "std": 5.0, "cl": 5, "eps": 0.05, "rounds": 3}  # 10}
+params = {"n": 100_000, "d": 2, "std": 5.0, "cl": 5, "eps": 0.05, "rounds": 3}
 
 ns = [2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 512000, 1024000]
-# ds = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20]
 ds = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-# ds = [12, 14, 16, 18, 20]
 stds = [1., 5., 10., 15., 20.]
-# stds = [10.]
 cls = [2, 4, 8, 12, 16]
-# cls = [12]
 epss = [0.0125, 0.025, 0.050, 0.1, 0.2, 0.500]
-# epss = [0.1, 0.25, 0.5]
 
 stages = ["Allocating", "Build structure", "Update", "Extra check", "Clustering", "Free Memory"]
 
@@ -787,7 +778,6 @@ class Experiments:
             offset = [0.] * len(subset_ns)
             for measurements, label in to_plot:
                 ax.bar(
-                    # tick_label=labels,
                     x=x,
                     height=measurements,
                     width=width,
@@ -797,10 +787,6 @@ class Experiments:
                 for i in range(len(measurements)):
                     offset[i] += measurements[i]
 
-            # ax.grid( 'off', axis='x' )
-            # ax.grid( axis='x', which='minor')
-
-            # ax.tick_params( axis='x', which='minor', direction='out', length=30 )
             ax.tick_params(axis='x', which='major', bottom=False, top=False)
 
             ax.set_xticks([x[i] for i in range(len(x)) if i % 2 == 0])
@@ -889,17 +875,6 @@ class Experiments:
             text_file.write(latex_tabular)
 
     def plot_space(self):
-
-        # ys = []
-        # for n in ns:
-        #     sum = 0
-        #     for round in range(params["rounds"]):
-        #         sum += self.get_space(label_GPU_SynC, n=n, round=round)
-        #     ys.append(sum / params["rounds"])
-        #
-        # plt.plot(ns, ys)
-        # plt.show()
-
         def get_xs_and_ys(method):
             ys = []
             for n in ns:
@@ -913,18 +888,13 @@ class Experiments:
 
 
 exp = Experiments()
-# exp.run(algorithms)
-# print(exp.get(label_GPU_SynC, cl=16, round=1))
-# exp.clear(label_GPU_SynC, cl=16, round=1)
-# exp.run(algorithms, cl=16)
-# print(exp.get(label_GPU_SynC, cl=16, round=1))
 
 
 exp.run_real()
-exp.run_inc_d()
-exp.run_inc_std()
-exp.run_inc_cl()
-exp.run_inc_n()
+# exp.run_inc_d()
+# exp.run_inc_std()
+# exp.run_inc_cl()
+# exp.run_inc_n()
 exp.run_inc_eps()
 
 # exp.plot_itr_time()
@@ -938,7 +908,7 @@ exp.run_inc_eps()
 # exp.plot_inc_n()
 # exp.plot_inc_d()
 # exp.plot_real_v2()
-# #
+
 # exp.plot_inc_n_speedup()
 # exp.plot_inc_d_speedup()
 # exp.plot_inc_std_speedup()
@@ -946,51 +916,3 @@ exp.run_inc_eps()
 # exp.plot_inc_eps_speedup()
 
 # get_legend("all", algorithms, figure_size)
-
-# data = exp.get_data(3001, 3, 10., 4, 0)
-# FSynC(data, 0.1)
-
-# data = torch.from_numpy(min_max_normalize(load_eb())).float()
-# eps = params["eps"]
-# data = exp.get_data(1000000, 3, 10., 10, 0)
-# exp.save_data_to_txt(1000000, 3, 10., 10, 0)
-
-# t0 = time.time()
-# SynC(data, eps)
-# t1 = time.time()
-# print("SynC:", t1-t0)
-
-# t0 = time.time()
-# FSynC(data, eps, 1000)
-# t1 = time.time()
-# print("FSynC B=1000:", t1-t0)
-
-# t0 = time.time()
-# FSynC(data, eps, 100)
-# t1 = time.time()
-# print("FSynC B=100:", t1-t0)
-
-# t0 = time.time()
-# FSynC(data, eps, 50)
-# t1 = time.time()
-# print("FSynC B=50:", t1-t0)
-
-# t0 = time.time()
-# FSynC(data, eps, 20)
-# t1 = time.time()
-# print("FSynC B=20:", t1-t0)
-
-
-# torch.cuda.synchronize()
-#
-# t0 = time.time()
-# GPU_SynC(data, eps, version=5)
-# t1 = time.time()
-# print("GPU-SynC:", t1 - t0)
-
-# torch.cuda.synchronize()
-#
-# t0 = time.time()
-# simple_GPU_SynC(data, eps)
-# t1 = time.time()
-# print("simple GPU-SynC:", t1 - t0) #26400
