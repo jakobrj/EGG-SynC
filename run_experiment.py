@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from python.data import *
 from python.algorithms import *
 
-exp_file = "saved_experiments.pkl"
+exp_file = "saved_experiments_server.pkl"
 
 params = {"n": 100_000, "d": 2, "std": 5.0, "cl": 5, "eps": 0.05, "rounds": 3}
 
