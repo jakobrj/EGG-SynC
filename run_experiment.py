@@ -25,9 +25,9 @@ label_SynC = "SynC"
 label_SynC_parallel = "SynC parallel"
 label_FSynC = "FSynC"
 algorithms = [
-    # (SynC, label_SynC),
-    # (SynC_parallel, label_SynC_parallel),
-    # (FSynC, label_FSynC),
+    (SynC, label_SynC),
+    (SynC_parallel, label_SynC_parallel),
+    (FSynC, label_FSynC),
     (simple_GPU_SynC, label_simple_GPU_SynC),
     (EGG_SynC, label_GPU_SynC),
 ]
@@ -888,33 +888,33 @@ class Experiments:
 
 
 exp = Experiments()
-exp.run(algorithms,n=1000)
-exp.run(algorithms)
+# exp.run(algorithms,n=1000)
+# exp.run(algorithms)
 
 
-# exp.run_real()
-# exp.run_inc_d()
-# exp.run_inc_std()
-# exp.run_inc_cl()
-# exp.run_inc_n()
-# exp.run_inc_eps()
+exp.run_real()
+exp.run_inc_d()
+exp.run_inc_std()
+exp.run_inc_cl()
+exp.run_inc_n()
+exp.run_inc_eps()
 
-# exp.plot_itr_time()
-# exp.table_stages()
+exp.plot_itr_time()
+exp.table_stages()
 # exp.plot_stages_v3()
-# exp.plot_space()
+exp.plot_space()
 
-# exp.plot_inc_std()
-# exp.plot_inc_cl()
-# exp.plot_inc_eps()
-# exp.plot_inc_n()
-# exp.plot_inc_d()
-# exp.plot_real_v2()
+exp.plot_inc_std()
+exp.plot_inc_cl()
+exp.plot_inc_eps()
+exp.plot_inc_n()
+exp.plot_inc_d()
+exp.plot_real_v2()
 
-# exp.plot_inc_n_speedup()
+exp.plot_inc_n_speedup()
 # exp.plot_inc_d_speedup()
 # exp.plot_inc_std_speedup()
 # exp.plot_inc_cl_speedup()
 # exp.plot_inc_eps_speedup()
 
-# get_legend("all", algorithms, figure_size)
+get_legend("all", algorithms, figure_size)
