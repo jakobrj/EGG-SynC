@@ -888,9 +888,10 @@ class Experiments:
 
 
 exp = Experiments()
+exp.run(algorithms)
 
 
-exp.run_real()
+# exp.run_real()
 # exp.run_inc_d()
 # exp.run_inc_std()
 # exp.run_inc_cl()
