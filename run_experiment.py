@@ -25,9 +25,9 @@ label_SynC = "SynC"
 label_SynC_parallel = "SynC parallel"
 label_FSynC = "FSynC"
 algorithms = [
-    (SynC, label_SynC),
-    (SynC_parallel, label_SynC_parallel),
-    (FSynC, label_FSynC),
+    # (SynC, label_SynC),
+    # (SynC_parallel, label_SynC_parallel),
+    # (FSynC, label_FSynC),
     (simple_GPU_SynC, label_simple_GPU_SynC),
     (EGG_SynC, label_GPU_SynC),
 ]
