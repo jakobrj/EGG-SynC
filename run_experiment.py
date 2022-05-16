@@ -888,6 +888,7 @@ class Experiments:
 
 
 exp = Experiments()
+exp.run(algorithms,n=1000)
 exp.run(algorithms)
 
 
